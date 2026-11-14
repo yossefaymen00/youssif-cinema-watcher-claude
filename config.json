@@ -1,0 +1,13 @@
+{
+  "movie_slug": "avengers-doomsday",
+  "movie_name": "Avengers: Doomsday",
+  "cinema_name": "City Centre Almaza",
+  "cinema_keywords": ["almaza", "الماظة", "المظة"],
+
+  "min_depth": 0.40,
+  "center_band": [0.20, 0.80],
+  "party_size": 1,
+  "renotify_after_taken": false,
+  "notify_new_showtimes": true,
+  "heartbeat_hour": 12
+}
