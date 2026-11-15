@@ -2,7 +2,8 @@ name: VOX watcher
 
 on:
   schedule:
-    - cron: "*/5 * * * *"    # كل 5 دقايق (أقل فاصل GitHub بيسمح بيه، وممكن يتأخر وقت الزحمة)
+    # كل 5 دقايق على دقايق "فردية" (مش 0/5/10...) لأن GitHub بيزحم ويتخطى التشغيلات عند الدقايق الرقيقة
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
   workflow_dispatch:
     inputs:
       test_telegram:
@@ -42,6 +43,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python vox_watcher.py --test-telegram
+
+      - name: Diagnose connection to VOX
+        if: ${{ inputs.debug && !inputs.test_telegram }}
+        continue-on-error: true
+        run: python vox_watcher.py --diagnose
 
       - name: Cache Playwright browser
         if: ${{ !inputs.test_telegram }}
