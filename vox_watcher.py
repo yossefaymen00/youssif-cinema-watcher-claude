@@ -631,10 +631,59 @@ def dump(name: str, content: str | bytes) -> None:
 
 async def dump_page(page, name: str) -> None:
     try:
+        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         dump(f"{name}.html", await page.content())
-        dump(f"{name}.png", await page.screenshot(full_page=True))
     except Exception as e:  # noqa: BLE001
-        log(f"debug dump فشل: {e}")
+        dump(f"{name}.html.error.txt", str(e))
+    try:
+        dump(f"{name}.png", await page.screenshot(full_page=True, timeout=10000))
+    except Exception as e:  # noqa: BLE001
+        log(f"screenshot فشل: {e}")
+
+
+def load_dotenv() -> None:
+    """للتشغيل على جهازك: ملف .env جنب السكريبت فيه TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID."""
+    p = ROOT / ".env"
+    if not p.exists():
+        return
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#") and "=" in ln:
+            k, v = ln.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
+
+
+def diagnose() -> int:
+    """بيوضّح هل السيرفر ده (GitHub أو جهازك) عارف يوصل لموقع VOX ولا الموقع رافضه."""
+    cfg = load_config()
+    hdr = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ar-EG,ar;q=0.9,en;q=0.8",
+    }
+    lines = ["### تشخيص الاتصال بموقع VOX"]
+    try:
+        ip = requests.get("https://ipinfo.io/json", timeout=15).json()
+        lines.append(f"- السيرفر ده: IP {ip.get('ip')} | بلد {ip.get('country')} | {ip.get('org')}")
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"- مقدرتش أعرف مكان السيرفر: {e}")
+    urls = [BASE_URL + "/", cfg["movie_url"].format(base=BASE_URL, slug=cfg["movie_slug"])]
+    for url in urls:
+        t0 = time.time()
+        try:
+            r = requests.get(url, headers=hdr, timeout=25)
+            keep = {k: v for k, v in r.headers.items()
+                    if k.lower() in ("server", "via", "cf-ray", "x-cache", "x-akamai-request-id")}
+            lines.append(f"- {url} -> HTTP {r.status_code} ({time.time() - t0:.1f}s) "
+                         f"{keep} | {len(r.text)} حرف | بداية الصفحة: {r.text[:100]!r}")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"- {url} -> فشل الاتصال: {type(e).__name__}: {str(e)[:200]}")
+    print("\n".join(lines))
+    write_summary(lines)
+    return 0
 
 
 # ───────────────────────── التشغيل ─────────────────────────
@@ -651,10 +700,18 @@ async def run() -> None:
     stats = {"showtimes": 0, "checked": 0, "good": 0, "alerts": 0}
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        # HTTP/1.1 بدل HTTP/2 (ERR_HTTP2_PROTOCOL_ERROR) وإخفاء علامة الأتمتة
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--disable-http2", "--disable-blink-features=AutomationControlled"],
+        )
         ctx = await browser.new_context(
             user_agent=UA, locale="ar-EG", timezone_id="Africa/Cairo",
             viewport={"width": 1366, "height": 900},
+            extra_http_headers={"Accept-Language": "ar-EG,ar;q=0.9,en;q=0.8"},
+        )
+        await ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
         page = await ctx.new_page()
 
@@ -671,19 +728,29 @@ async def run() -> None:
         url = cfg["movie_url"].format(base=BASE_URL, slug=cfg["movie_slug"])
         log(f"فتح {url}")
         status = 0
+        nav_error = ""
         showtimes: list[dict] = []
-        try:
-            resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            status = resp.status if resp else 0
-            await settle(page)
-            if status < 400:
+        for attempt in range(3):
+            try:
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                status = resp.status if resp else 0
+                nav_error = ""
+                break
+            except Exception as e:  # noqa: BLE001
+                nav_error = str(e).splitlines()[0][:200]
+                log(f"محاولة {attempt + 1}/3 فشلت: {nav_error}")
+                await page.wait_for_timeout(3000)
+        if status and status < 400:
+            try:
+                await settle(page)
                 await select_cinema(page, cfg)
                 showtimes = await collect_showtimes(page, cfg)
-        except Exception as e:  # noqa: BLE001
-            log(f"خطأ في فتح صفحة الفيلم: {e}")
+            except Exception as e:  # noqa: BLE001
+                log(f"خطأ في قراءة الحفلات: {e}")
         log(f"status={status} | حفلات الماظة: {len(showtimes)}")
 
         if DEBUG or not showtimes:
+            dump("error.txt", f"status={status}\nnav_error={nav_error}\nurl={url}\n")
             await dump_page(page, "movie_page")
             dump("json_responses.json", json.dumps(
                 [{"url": u, "data": d} for u, d in captured][:80],
@@ -698,7 +765,7 @@ async def run() -> None:
                     and not state.get("fail_alerted")):
                 why = {404: "الفيلم لسه مش موجود على الموقع (404)",
                        403: "الموقع رافض الطلب من سيرفر GitHub (403)",
-                       0: "الصفحة مفتحتش"}.get(
+                       0: f"الموقع قفل الاتصال ({nav_error or 'بدون تفاصيل'}). غالبًا بيرفض سيرفرات GitHub"}.get(
                     status, f"الصفحة اتفتحت (status {status}) بس مفيش حفلات للماظة ظاهرة")
                 if send_telegram(
                     f"⚠️ <b>VOX watcher</b>: مفيش حفلات لـ {h(cfg['movie_name'])} من "
@@ -879,6 +946,19 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
+    load_dotenv()
+    if "--diagnose" in sys.argv:
+        sys.exit(diagnose())
     if "--test-telegram" in sys.argv:
         sys.exit(test_telegram())
+    if "--loop" in sys.argv:  # للتشغيل على جهازك: python vox_watcher.py --loop 300
+        i = sys.argv.index("--loop")
+        secs = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else 300
+        while True:
+            try:
+                asyncio.run(run())
+            except Exception as e:  # noqa: BLE001
+                log(f"خطأ: {e}")
+            log(f"استنى {secs} ثانية...")
+            time.sleep(secs)
     asyncio.run(run())
