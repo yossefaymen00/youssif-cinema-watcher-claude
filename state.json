@@ -1,6 +1,6 @@
 {
  "fail_alerted": true,
- "fail_count": 5,
+ "fail_count": 6,
  "last_heartbeat": "2026-11-15",
  "started_at": "2026-11-14T22:13+02:00"
 }
